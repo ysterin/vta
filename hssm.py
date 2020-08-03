@@ -1,5 +1,7 @@
 from modules import *
 from utils import *
+import torch
+from torch import nn
 
 
 class HierarchicalStateSpaceModel(nn.Module):
