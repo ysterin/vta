@@ -157,30 +157,13 @@ class LatentDistribution(nn.Module):
 
 class Encoder(nn.Module):
     def __init__(self,
+                 input_size,
                  output_size=None,
                  feat_size=64):
         super(Encoder, self).__init__()
-        network_list = [ConvLayer2D(input_size=3,
-                                    output_size=feat_size,
-                                    kernel_size=4,
-                                    stride=2,
-                                    padding=1),  # 16 x 16
-                        ConvLayer2D(input_size=feat_size,
-                                    output_size=feat_size,
-                                    kernel_size=4,
-                                    stride=2,
-                                    padding=1),  # 8 x 8
-                        ConvLayer2D(input_size=feat_size,
-                                    output_size=feat_size,
-                                    kernel_size=4,
-                                    stride=2,
-                                    padding=1),  # 4 x 4
-                        ConvLayer2D(input_size=feat_size,
-                                    output_size=feat_size,
-                                    kernel_size=4,
-                                    stride=1,
-                                    padding=0),  # 1 x 1
-                        Flatten()]
+
+        network_list = [LinearLayer(input_size, feat_size), 
+                        LinearLayer(feat_size, feat_size)]
         if output_size is not None:
             network_list.append(LinearLayer(input_size=feat_size,
                                             output_size=output_size))
@@ -197,6 +180,7 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self,
                  input_size,
+                 output_size, 
                  feat_size=64):
         super(Decoder, self).__init__()
         if input_size == feat_size:
@@ -205,22 +189,35 @@ class Decoder(nn.Module):
             self.linear = LinearLayer(input_size=input_size,
                                       output_size=feat_size,
                                       nonlinear=nn.Identity())
-        self.network = nn.Sequential(ConvTransLayer2D(input_size=feat_size,
-                                                      output_size=feat_size,
-                                                      kernel_size=4,
-                                                      stride=1,
-                                                      padding=0),
-                                     ConvTransLayer2D(input_size=feat_size,
-                                                      output_size=feat_size),
-                                     ConvTransLayer2D(input_size=feat_size,
-                                                      output_size=feat_size),
-                                     ConvTransLayer2D(input_size=feat_size,
-                                                      output_size=3,
-                                                      normalize=False,
-                                                      nonlinear=nn.Tanh()))
+        self.network = nn.Sequential(LinearLayer(feat_size, feat_size), 
+                                     LinearLayer(feat_size, output_size, nonlinear=nn.Identity()))
 
     def forward(self, input_data):
-        return self.network(self.linear(input_data).unsqueeze(-1).unsqueeze(-1))
+        return self.network(self.linear(input_data))
+
+
+class ProbDecoder(nn.Module):
+    def __init__(self,
+                 input_size,
+                 output_size, 
+                 feat_size=64):
+        super(ProbDecoder, self).__init__()
+        if input_size == feat_size:
+            self.linear = nn.Identity()
+        else:
+            self.linear = LinearLayer(input_size=input_size,
+                                      output_size=feat_size,
+                                      nonlinear=nn.Identity())
+        self.network = nn.Sequential(LinearLayer(feat_size, feat_size), 
+                                     LinearLayer(feat_size, feat_size))
+        self.out_mean = LinearLayer(feat_size, output_size, nonlinear=nn.Identity())
+        self.out_logvar = LinearLayer(feat_size, output_size, nonlinear=nn.Identity())
+        
+
+    def forward(self, input_data):
+        x = self.network(self.linear(input_data))
+        mu, logvar = self.out_mean(x), self.out_logvar(x)
+        return mu, logvar
 
 
 class PriorBoundaryDetector(nn.Module):

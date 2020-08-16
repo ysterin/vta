@@ -2,16 +2,18 @@ from modules import *
 from utils import *
 import torch
 from torch import nn
-
+import pytorch_lightning as pl
 
 class HierarchicalStateSpaceModel(nn.Module):
     def __init__(self,
+                 input_size,
                  belief_size,
                  state_size,
                  num_layers,
                  max_seg_len,
                  max_seg_num):
         super(HierarchicalStateSpaceModel, self).__init__()
+        self.input_size = input_size
         ################
         # network size #
         ################
@@ -39,8 +41,8 @@ class HierarchicalStateSpaceModel(nn.Module):
         #################################
         # observation encoder / decoder #
         #################################
-        self.enc_obs = Encoder(feat_size=self.feat_size)
-        self.dec_obs = Decoder(input_size=self.obs_feat_size,
+        self.enc_obs = Encoder(feat_size=self.feat_size, input_size=input_size)
+        self.dec_obs = ProbDecoder(input_size=self.obs_feat_size, output_size=input_size,
                                feat_size=self.feat_size)
 
         #####################
@@ -194,7 +196,7 @@ class HierarchicalStateSpaceModel(nn.Module):
 
         ######################
         # boundary sampling ##
-        ######################
+        ###################### 
         post_boundary_log_alpha_list = self.post_boundary(enc_obs_list)
         boundary_data_list, post_boundary_sample_logit_list = self.boundary_sampler(post_boundary_log_alpha_list)
         boundary_data_list[:, :(init_size + 1), 0] = 1.0
@@ -296,8 +298,9 @@ class HierarchicalStateSpaceModel(nn.Module):
 
         # decode all together
         obs_rec_list = torch.stack(obs_rec_list, dim=1)
-        obs_rec_list = self.dec_obs(obs_rec_list.view(num_samples * seq_size, -1))
-        obs_rec_list = obs_rec_list.view(num_samples, seq_size, *obs_rec_list.size()[-3:])
+        obs_rec_mean_list, obs_rec_logvar_list = self.dec_obs(obs_rec_list.view(num_samples * seq_size, -1))
+        obs_rec_mean_list = obs_rec_mean_list.view(num_samples, seq_size, self.input_size)
+        obs_rec_logvar_list = obs_rec_logvar_list.view(num_samples, seq_size, self.input_size)
 
         # stack results
         prior_boundary_log_alpha_list = torch.stack(prior_boundary_log_alpha_list, dim=1)
@@ -327,7 +330,8 @@ class HierarchicalStateSpaceModel(nn.Module):
         boundary_data_list = boundary_data_list[..., 0].unsqueeze(-1)
 
         # return
-        return [obs_rec_list,
+        return [obs_rec_mean_list,
+                obs_rec_logvar_list,
                 prior_boundary_log_density,
                 post_boundary_log_density,
                 prior_abs_state_list,
@@ -339,145 +343,203 @@ class HierarchicalStateSpaceModel(nn.Module):
                 post_boundary_list]
 
     # generation forward
-    def jumpy_generation(self, init_data_list, seq_size):
-        # eval mode
-        self.eval()
+    # def jumpy_generation(self, init_data_list, seq_size):
+    #     # eval mode
+    #     self.eval()
 
-        ########################
-        # initialize variables #
-        ########################
-        num_samples = init_data_list.size(0)
-        init_size = init_data_list.size(1)
+    #     ########################
+    #     # initialize variables #
+    #     ########################
+    #     num_samples = init_data_list.size(0)
+    #     init_size = init_data_list.size(1)
 
-        ####################
-        # forward encoding #
-        ####################
-        abs_post_fwd = init_data_list.new_zeros(num_samples, self.abs_belief_size)
-        for t in range(init_size):
-            abs_post_fwd = self.abs_post_fwd(self.enc_obs(init_data_list[:, t]), abs_post_fwd)
+    #     ####################
+    #     # forward encoding #
+    #     ####################
+    #     abs_post_fwd = init_data_list.new_zeros(num_samples, self.abs_belief_size)
+    #     for t in range(init_size):
+    #         abs_post_fwd = self.abs_post_fwd(self.enc_obs(init_data_list[:, t]), abs_post_fwd)
 
-        ##############
-        # init state #
-        ##############
-        abs_belief = init_data_list.new_zeros(num_samples, self.abs_belief_size)
-        abs_state = init_data_list.new_zeros(num_samples, self.abs_state_size)
+    #     ##############
+    #     # init state #
+    #     ##############
+    #     abs_belief = init_data_list.new_zeros(num_samples, self.abs_belief_size)
+    #     abs_state = init_data_list.new_zeros(num_samples, self.abs_state_size)
 
-        #############
-        # init list #
-        #############
-        obs_rec_list = []
+    #     #############
+    #     # init list #
+    #     #############
+    #     obs_rec_list = []
 
-        ######################
-        # forward transition #
-        ######################
-        for t in range(seq_size):
-            #############################
-            # (1) sample abstract state #
-            #############################
-            if t == 0:
-                abs_belief = self.init_abs_belief(abs_post_fwd)
-            else:
-                abs_belief = self.update_abs_belief(abs_state, abs_belief)
-            abs_state = self.prior_abs_state(abs_belief).rsample()
-            abs_feat = self.abs_feat(concat(abs_belief, abs_state))
+    #     ######################
+    #     # forward transition #
+    #     ######################
+    #     for t in range(seq_size):
+    #         #############################
+    #         # (1) sample abstract state #
+    #         #############################
+    #         if t == 0:
+    #             abs_belief = self.init_abs_belief(abs_post_fwd)
+    #         else:
+    #             abs_belief = self.update_abs_belief(abs_state, abs_belief)
+    #         abs_state = self.prior_abs_state(abs_belief).rsample()
+    #         abs_feat = self.abs_feat(concat(abs_belief, abs_state))
 
-            ################################
-            # (2) sample observation state #
-            ################################
-            obs_belief = self.init_obs_belief(abs_feat)
-            obs_state = self.prior_obs_state(obs_belief).rsample()
-            obs_feat = self.obs_feat(concat(obs_belief, obs_state))
+    #         ################################
+    #         # (2) sample observation state #
+    #         ################################
+    #         obs_belief = self.init_obs_belief(abs_feat)
+    #         obs_state = self.prior_obs_state(obs_belief).rsample()
+    #         obs_feat = self.obs_feat(concat(obs_belief, obs_state))
 
-            ##########################
-            # (3) decode observation #
-            ##########################
-            obs_rec = self.dec_obs(obs_feat)
+    #         ##########################
+    #         # (3) decode observation #
+    #         ##########################
+    #         obs_rec = self.dec_obs(obs_feat)
 
-            ############
-            # (4) save #
-            ############
-            obs_rec_list.append(obs_rec)
+    #         ############
+    #         # (4) save #
+    #         ############
+    #         obs_rec_list.append(obs_rec)
 
-        obs_rec_list = torch.stack(obs_rec_list, dim=1)
-        return obs_rec_list
+    #     obs_rec_list = torch.stack(obs_rec_list, dim=1)
+    #     return obs_rec_list
 
     # generation forward
-    def full_generation(self, init_data_list, seq_size):
-        # eval mode
-        self.eval()
+    # def full_generation(self, init_data_list, seq_size):
+    #     # eval mode
+    #     self.eval()
 
-        ########################
-        # initialize variables #
-        ########################
-        num_samples = init_data_list.size(0)
-        init_size = init_data_list.size(1)
+    #     ########################
+    #     # initialize variables #
+    #     ########################
+    #     num_samples = init_data_list.size(0)
+    #     init_size = init_data_list.size(1)
 
-        ####################
-        # forward encoding #
-        ####################
-        abs_post_fwd = init_data_list.new_zeros(num_samples, self.abs_belief_size)
-        for t in range(init_size):
-            abs_post_fwd = self.abs_post_fwd(self.enc_obs(init_data_list[:, t]), abs_post_fwd)
+    #     ####################
+    #     # forward encoding #
+    #     ####################
+    #     abs_post_fwd = init_data_list.new_zeros(num_samples, self.abs_belief_size)
+    #     for t in range(init_size):
+    #         abs_post_fwd = self.abs_post_fwd(self.enc_obs(init_data_list[:, t]), abs_post_fwd)
 
-        ##############
-        # init state #
-        ##############
-        abs_belief = init_data_list.new_zeros(num_samples, self.abs_belief_size)
-        abs_state = init_data_list.new_zeros(num_samples, self.abs_state_size)
-        obs_belief = init_data_list.new_zeros(num_samples, self.obs_belief_size)
-        obs_state = init_data_list.new_zeros(num_samples, self.obs_state_size)
+    #     ##############
+    #     # init state #
+    #     ##############
+    #     abs_belief = init_data_list.new_zeros(num_samples, self.abs_belief_size)
+    #     abs_state = init_data_list.new_zeros(num_samples, self.abs_state_size)
+    #     obs_belief = init_data_list.new_zeros(num_samples, self.obs_belief_size)
+    #     obs_state = init_data_list.new_zeros(num_samples, self.obs_state_size)
 
-        #############
-        # init list #
-        #############
-        obs_rec_list = []
-        boundary_data_list = []
+    #     #############
+    #     # init list #
+    #     #############
+    #     obs_rec_list = []
+    #     boundary_data_list = []
 
-        ######################
-        # forward transition #
-        ######################
-        read_data = init_data_list.new_ones(num_samples, 1)
-        copy_data = 1 - read_data
-        for t in range(seq_size):
-            #############################
-            # (1) sample abstract state #
-            #############################
-            if t == 0:
-                abs_belief = self.init_abs_belief(abs_post_fwd)
-            else:
-                abs_belief = read_data * self.update_abs_belief(abs_state, abs_belief) + copy_data * abs_belief
-            abs_state = read_data * self.prior_abs_state(abs_belief).rsample() + copy_data * abs_state
-            abs_feat = self.abs_feat(concat(abs_belief, abs_state))
+    #     ######################
+    #     # forward transition #
+    #     ######################
+    #     read_data = init_data_list.new_ones(num_samples, 1)
+    #     copy_data = 1 - read_data
+    #     for t in range(seq_size):
+    #         #############################
+    #         # (1) sample abstract state #
+    #         #############################
+    #         if t == 0:
+    #             abs_belief = self.init_abs_belief(abs_post_fwd)
+    #         else:
+    #             abs_belief = read_data * self.update_abs_belief(abs_state, abs_belief) + copy_data * abs_belief
+    #         abs_state = read_data * self.prior_abs_state(abs_belief).rsample() + copy_data * abs_state
+    #         abs_feat = self.abs_feat(concat(abs_belief, abs_state))
 
-            ################################
-            # (2) sample observation state #
-            ################################
-            obs_belief = read_data * self.init_obs_belief(abs_feat) + copy_data * self.update_obs_belief(concat(obs_state, abs_feat), obs_belief)
-            obs_state = self.prior_obs_state(obs_belief).rsample()
-            obs_feat = self.obs_feat(concat(obs_belief, obs_state))
+    #         ################################
+    #         # (2) sample observation state #
+    #         ################################
+    #         obs_belief = read_data * self.init_obs_belief(abs_feat) + copy_data * self.update_obs_belief(concat(obs_state, abs_feat), obs_belief)
+    #         obs_state = self.prior_obs_state(obs_belief).rsample()
+    #         obs_feat = self.obs_feat(concat(obs_belief, obs_state))
 
-            ##########################
-            # (3) decode observation #
-            ##########################
-            obs_rec = self.dec_obs(obs_feat)
+    #         ##########################
+    #         # (3) decode observation #
+    #         ##########################
+    #         obs_rec = self.dec_obs(obs_feat)
 
-            ############
-            # (4) save #
-            ############
-            obs_rec_list.append(obs_rec)
-            boundary_data_list.append(read_data)
+    #         ############
+    #         # (4) save #
+    #         ############
+    #         obs_rec_list.append(obs_rec)
+    #         boundary_data_list.append(read_data)
 
-            ###################
-            # (5) sample mask #
-            ###################
-            prior_boundary = self.boundary_sampler(self.prior_boundary(obs_feat))[0]
-            read_data = prior_boundary[:, 0].unsqueeze(-1)
-            copy_data = prior_boundary[:, 1].unsqueeze(-1)
+    #         ###################
+    #         # (5) sample mask #
+    #         ###################
+    #         prior_boundary = self.boundary_sampler(self.prior_boundary(obs_feat))[0]
+    #         read_data = prior_boundary[:, 0].unsqueeze(-1)
+    #         copy_data = prior_boundary[:, 1].unsqueeze(-1)
 
-        # stack results
-        obs_rec_list = torch.stack(obs_rec_list, dim=1)
-        boundary_data_list = torch.stack(boundary_data_list, dim=1)
-        return obs_rec_list, boundary_data_list
+    #     # stack results
+    #     obs_rec_list = torch.stack(obs_rec_list, dim=1)
+    #     boundary_data_list = torch.stack(boundary_data_list, dim=1)
+    #     return obs_rec_list, boundary_data_list
+
+
+def loss_func(model_output, obs_data_list, init_size=5):
+    [obs_rec_mean_list,
+     obs_rec_logvar_list,
+     prior_boundary_log_density_list,
+     post_boundary_log_density_list,
+     prior_abs_state_list,
+     post_abs_state_list,
+     prior_obs_state_list,
+     post_obs_state_list,
+     boundary_data_list,
+     prior_boundary_list,
+     post_boundary_list] =  model_output
+     
+    seq_size = obs_rec_mean_list.shape[1]
+    ########################################################
+    # (2) compute obs_cost (sum over spatial and channels) #
+    ########################################################
+    obs_target_list = obs_data_list[:, init_size:-init_size]
+    obs_std = (0.5 * obs_rec_logvar_list).exp()
+    obs_cost = - Normal(obs_rec_mean_list, obs_std).log_prob(obs_target_list)
+    obs_cost = obs_cost.sum(dim=[2])
+
+    #######################
+    # (3) compute kl_cost #
+    #######################
+    # compute kl related to states
+    kl_abs_state_list = []
+    kl_obs_state_list = []
+    for t in range(seq_size):
+        # read flag
+        read_data = boundary_data_list[:, t].detach()
+
+        # kl divergences (sum over dimension)
+        kl_abs_state = kl_divergence(post_abs_state_list[t], prior_abs_state_list[t]) * read_data
+        kl_obs_state = kl_divergence(post_obs_state_list[t], prior_obs_state_list[t])
+        kl_abs_state_list.append(kl_abs_state.sum(-1))
+        kl_obs_state_list.append(kl_obs_state.sum(-1))
+    kl_abs_state_list = torch.stack(kl_abs_state_list, dim=1)
+    kl_obs_state_list = torch.stack(kl_obs_state_list, dim=1)
+
+    # compute kl related to boundary
+    kl_mask_list = (post_boundary_log_density_list - prior_boundary_log_density_list)
+
+    # return
+    return {'rec_data': obs_rec_mean_list,
+            'rec_logvar': obs_rec_logvar_list,
+            'mask_data': boundary_data_list,
+            'obs_cost': obs_cost, 
+            'kl_abs_state': kl_abs_state_list,
+            'kl_obs_state': kl_obs_state_list,
+            'kl_mask': kl_mask_list,
+            'p_mask': prior_boundary_list.mean,
+            'q_mask': post_boundary_list.mean,
+            'p_ent': prior_boundary_list.entropy(),
+            'q_ent': post_boundary_list.entropy(),
+            'train_loss': obs_cost.mean() + kl_abs_state_list.mean() + kl_obs_state_list.mean() + kl_mask_list.mean()}
 
 
 class EnvModel(nn.Module):
